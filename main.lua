@@ -1,14 +1,19 @@
 local W=loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
-local P,R,U,WS,LT,TP,MS,TS=game:GetService("Players"),game:GetService("RunService"),game:GetService("UserInputService"),workspace,game:GetService("Lighting"),game:GetService("TeleportService"),game:GetService("MarketplaceService"),game:GetService("TweenService")
+local P,R,U,WS,LT,TP,MS=game:GetService("Players"),game:GetService("RunService"),game:GetService("UserInputService"),workspace,game:GetService("Lighting"),game:GetService("TeleportService"),game:GetService("MarketplaceService")
 local L,C=P.LocalPlayer,WS.CurrentCamera
 local M=U.TouchEnabled and not U.KeyboardEnabled
-local S={WSv=16,FS=50,VFS=80,AF=150,AS=.1,SFv=120,DFm=70,DFM=130,curFX="无",spin=false,spinSpeed=360}
+local S={WSv=16,FS=50,VFS=80,AF=150,Smooth=3,Prediction=0.15,AimReal=true,AimNPC=false,SFv=120,DFm=70,DFM=130,curFX="无",spin=false,spinSpeed=360}
 local function ch()return L.Character end
 local function hm()local c=ch()return c and c:FindFirstChildOfClass("Humanoid")end
 local function rt()local c=ch()return c and c:FindFirstChild("HumanoidRootPart")end
 local function nt(t,c)W:Notify({Title=t,Content=c,Icon="check",Duration=3})end
 local function NM()local n={}for _,p in ipairs(P:GetPlayers())do if p~=L then n[#n+1]=p.Name end end return n end
 local function lp(k,f,w)task.spawn(function()while S[k]do pcall(f)task.wait(w or .5)end end)end
+
+-- 判断目标是否是真人玩家
+local function isRealPlayer(character)
+    return P:GetPlayerFromCharacter(character) ~= nil
+end
 
 local F={}
 F.sta=function()local c=ch()if c then for _,v in ipairs(c:GetDescendants())do if v:IsA("Script")and v.Name:lower():find("stamina")then v.Disabled=true end end end end
@@ -237,15 +242,82 @@ end)
 for _,p in ipairs(P:GetPlayers())do mkE(p)end
 P.PlayerAdded:Connect(function(p)p.CharacterAdded:Connect(function()task.wait(1)mkE(p)end)end)
 
+-- ==================== 自瞄（含预判 + 人机选择 + 平滑度优化） ====================
+-- 收集所有候选目标（真人 + 人机）
+local function getTargets()
+    local targets={}
+    -- 真人玩家
+    if S.AimReal then
+        for _,p in ipairs(P:GetPlayers())do
+            if p~=L and p.Character then
+                local h=p.Character:FindFirstChildOfClass("Humanoid")
+                local r=p.Character:FindFirstChild("HumanoidRootPart")
+                if h and r and h.Health>0 then
+                    table.insert(targets,{character=p.Character,isPlayer=true})
+                end
+            end
+        end
+    end
+    -- 人机 / NPC
+    if S.AimNPC then
+        for _,m in ipairs(WS:GetChildren())do
+            if m:IsA("Model") and m~=ch() then
+                local h=m:FindFirstChildOfClass("Humanoid")
+                local r=m:FindFirstChild("HumanoidRootPart")
+                if h and r and h.Health>0 and not P:GetPlayerFromCharacter(m) then
+                    table.insert(targets,{character=m,isPlayer=false})
+                end
+            end
+        end
+    end
+    return targets
+end
+
 R.RenderStepped:Connect(function()
- if not S.Aim then return end
- local mr=rt()if not mr then return end
- local t,md=nil,S.AF
- for _,p in ipairs(P:GetPlayers())do
-  if p~=L and p.Character then local r=p.Character:FindFirstChild("HumanoidRootPart")local h=p.Character:FindFirstChildOfClass("Humanoid")if r and h and h.Health>0 then local d=(r.Position-mr.Position).Magnitude if d<md then md=d t=p end end end
- end
- if t and t.Character then local r=t.Character:FindFirstChild("HumanoidRootPart")if r then local ap=r.Position if S.AT=="Head" then local hd=t.Character:FindFirstChild("Head")if hd then ap=hd.Position end end local d=(ap-mr.Position).Unit C.CFrame=C.CFrame:Lerp(CFrame.new(mr.Position,mr.Position+d),S.AS)end end
+    if not S.Aim then return end
+    local mr=rt() if not mr then return end
+    local bestTarget,bestDist=nil,S.AF
+    local targets=getTargets()
+    for _,t in ipairs(targets)do
+        local char=t.character
+        if char and char.Parent then
+            local r=char:FindFirstChild("HumanoidRootPart")
+            local h=char:FindFirstChildOfClass("Humanoid")
+            if r and h and h.Health>0 then
+                local d=(r.Position-mr.Position).Magnitude
+                if d<bestDist then bestDist=d bestTarget=char end
+            end
+        end
+    end
+    if bestTarget then
+        -- 获取瞄准部位 + 预判
+        local aimPos
+        local aimPart=bestTarget:FindFirstChild("Head")
+        if S.AT=="Head" and aimPart then
+            aimPos=aimPart.Position
+        else
+            aimPos=bestTarget:FindFirstChild("HumanoidRootPart").Position
+        end
+        -- 预判：根据目标速度预测未来位置
+        if S.Prediction>0 then
+            local vel=Vector3.zero
+            if aimPart and aimPart.AssemblyLinearVelocity then
+                vel=aimPart.AssemblyLinearVelocity
+            end
+            aimPos=aimPos+vel*S.Prediction
+        end
+        -- 平滑对准
+        local dir=(aimPos-mr.Position)
+        if dir.Magnitude>0.01 then
+            local newCF=CFrame.new(mr.Position,mr.Position+dir.Unit)
+            -- 平滑度 0~10，越小越准。换算为 Lerp alpha（每帧靠近比例）
+            -- Smooth=0 → alpha≈0.95（几乎瞬移）；Smooth=10 → alpha≈0.09（最平滑）
+            local alpha=math.clamp(1-S.Smooth/11,0.05,0.95)
+            C.CFrame=C.CFrame:Lerp(newCF,alpha)
+        end
+    end
 end)
+
 local FC=Drawing.new("Circle")FC.Thickness=2 FC.Color=Color3.fromRGB(255,80,80)FC.NumSides=64 FC.Visible=false
 R.RenderStepped:Connect(function()if S.ShowFOV then FC.Position=Vector2.new(C.ViewportSize.X/2,C.ViewportSize.Y/2)FC.Radius=S.AF FC.Visible=true else FC.Visible=false end end)
 R.RenderStepped:Connect(function()
@@ -267,16 +339,38 @@ local Wn=W:CreateWindow({Title="ACE作弊精简版",Icon="door-open",Author="ACE
 Wn:EditOpenButton({Title="ACE 简洁版",Icon="monitor",CornerRadius=UDim.new(0,16),StrokeThickness=2,Color=ColorSequence.new(Color3.fromHex("FF0F7B"),Color3.fromHex("F89B29")),Draggable=true})
 task.defer(function()task.wait(.2)pcall(function()Wn:Close()end)end)
 
--- ==================== 欢迎弹窗（背景图 + 10 秒倒计时 + 过渡动画） ====================
--- ⚠️ 替换下面的图片 ID 为你自己上传的图片
-local BG_IMAGE = "rbxassetid://YOUR_ID_HERE"
+-- ==================== 倒计时期间隐藏灵动岛打开按钮 ====================
+local function toggleOpenButton(show)
+    pcall(function()
+        local pg=L:FindFirstChild("PlayerGui")
+        if not pg then return end
+        for _,g in ipairs(pg:GetChildren())do
+            if g:IsA("ScreenGui") then
+                for _,d in ipairs(g:GetDescendants())do
+                    if d:IsA("TextButton") and d.Text and d.Text:find("ACE 简洁版") then
+                        d.Visible=show
+                        if d.Parent and d.Parent:IsA("GuiObject") then
+                            d.Parent.Visible=show
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
 
+task.spawn(function()
+    task.wait(0.3)
+    toggleOpenButton(false)   -- 隐藏
+end)
+
+-- ==================== 欢迎弹窗（原生 GUI + 倒计时 + QQ 群标红） ====================
 local function showWelcomePopup()
     local gui=Instance.new("ScreenGui")
     gui.Name="AceWelcome"
     gui.ResetOnSpawn=false
     gui.IgnoreGuiInset=true
-    gui.DisplayOrder=9999
+    gui.DisplayOrder=99999
     gui.Parent=L:WaitForChild("PlayerGui")
 
     local dim=Instance.new("Frame",gui)
@@ -286,69 +380,43 @@ local function showWelcomePopup()
     dim.BorderSizePixel=0
 
     local box=Instance.new("Frame",dim)
-    box.Size=UDim2.fromOffset(440,320)
+    box.Size=UDim2.fromOffset(440,340)
     box.Position=UDim2.fromScale(0.5,0.5)
     box.AnchorPoint=Vector2.new(0.5,0.5)
     box.BackgroundColor3=Color3.fromRGB(25,25,35)
     box.BorderSizePixel=0
-    box.ClipsDescendants=true
     Instance.new("UICorner",box).CornerRadius=UDim.new(0,14)
 
-    -- 背景图片层（铺满整个弹窗）
-    local bgImg=Instance.new("ImageLabel",box)
-    bgImg.Name="BgImage"
-    bgImg.Size=UDim2.fromScale(1,1)
-    bgImg.Position=UDim2.fromScale(0,0)
-    bgImg.BackgroundTransparency=1
-    bgImg.Image=BG_IMAGE
-    bgImg.ScaleType=Enum.ScaleType.Crop
-    bgImg.ImageTransparency=0.35     -- 半透明，让文字更清晰
-    bgImg.ZIndex=1
-    Instance.new("UICorner",bgImg).CornerRadius=UDim.new(0,14)
-
-    -- 深色遮罩层（保证文字可读）
-    local overlay=Instance.new("Frame",box)
-    overlay.Size=UDim2.fromScale(1,1)
-    overlay.BackgroundColor3=Color3.fromRGB(0,0,0)
-    overlay.BackgroundTransparency=0.35
-    overlay.BorderSizePixel=0
-    overlay.ZIndex=2
-    Instance.new("UICorner",overlay).CornerRadius=UDim.new(0,14)
-
     local stroke=Instance.new("UIStroke",box)
-    stroke.Color=Color3.fromRGB(255,215,0)   -- 金色边框呼应背景
+    stroke.Color=Color3.fromRGB(124,58,237)
     stroke.Thickness=2
-    stroke.ZIndex=3
 
     local title=Instance.new("TextLabel",box)
     title.Size=UDim2.new(1,-40,0,32)
     title.Position=UDim2.new(0,20,0,18)
     title.BackgroundTransparency=1
     title.Text="欢迎！"
-    title.TextColor3=Color3.fromRGB(255,215,0)  -- 金色标题
+    title.TextColor3=Color3.fromRGB(200,180,255)
     title.TextSize=22
     title.Font=Enum.Font.GothamBold
     title.TextXAlignment=Enum.TextXAlignment.Left
-    title.ZIndex=5
 
     local content=Instance.new("TextLabel",box)
-    content.Size=UDim2.new(1,-40,0,210)
+    content.Size=UDim2.new(1,-40,0,230)
     content.Position=UDim2.new(0,20,0,58)
     content.BackgroundTransparency=1
+    content.RichText=true
     content.Text=
         "欢迎使用 ACE作弊精简版，祝你游戏愉快！\n\n"..
-        "官方 QQ 群：1128017697\n"..
+        "官方 QQ 群：<font color=\"rgb(255,40,40)\">1128017697</font>\n"..
         "加入官方群可以获取最新版本、使用教程和问题反馈，遇到任何问题都可以在群里提问。\n\n"..
         "如果觉得脚本好用，欢迎推荐给朋友，也欢迎在能力范围内支持一下作者。"
-    content.TextColor3=Color3.fromRGB(255,255,255)
+    content.TextColor3=Color3.fromRGB(230,230,240)
     content.TextSize=14
     content.Font=Enum.Font.Gotham
     content.TextXAlignment=Enum.TextXAlignment.Left
     content.TextYAlignment=Enum.TextYAlignment.Top
     content.TextWrapped=true
-    content.ZIndex=5
-    content.TextStrokeTransparency=0.6
-    content.TextStrokeColor3=Color3.new(0,0,0)
 
     local btn=Instance.new("TextButton",box)
     btn.Size=UDim2.fromOffset(180,46)
@@ -360,7 +428,6 @@ local function showWelcomePopup()
     btn.TextSize=15
     btn.Font=Enum.Font.GothamBold
     btn.AutoButtonColor=false
-    btn.ZIndex=5
     Instance.new("UICorner",btn).CornerRadius=UDim.new(0,8)
 
     local ready=false
@@ -377,47 +444,18 @@ local function showWelcomePopup()
     end)
 
     btn.MouseButton1Click:Connect(function()
-        if not ready then return end
-        ready=false
-        btn.Active=false
-        btn.Text="进入中..."
-
-        -- 过渡动画：
-        -- 阶段 1：弹窗缩小 + 淡出（0.5s）
-        local ti1=TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-        TS:Create(box, ti1, {
-            Size=UDim2.fromOffset(120,120),
-            BackgroundTransparency=1,
-        }):Play()
-        TS:Create(bgImg, ti1, {ImageTransparency=1}):Play()
-        TS:Create(overlay, ti1, {BackgroundTransparency=1}):Play()
-        TS:Create(stroke, ti1, {Transparency=1}):Play()
-        TS:Create(title, ti1, {TextTransparency=1}):Play()
-        TS:Create(content, ti1, {TextTransparency=1, TextStrokeTransparency=1}):Play()
-        TS:Create(btn, ti1, {BackgroundTransparency=1, TextTransparency=1}):Play()
-
-        -- 阶段 2：遮罩渐变为纯黑（0.5s）
-        TS:Create(dim, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-            BackgroundTransparency=0,
-        }):Play()
-
-        task.wait(0.6)
-
-        -- 阶段 3：黑屏停留（0.3s）
-        task.wait(0.3)
-
-        -- 阶段 4：黑屏渐隐（0.6s）
-        TS:Create(dim, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-            BackgroundTransparency=1,
-        }):Play()
-
-        task.wait(0.7)
-        gui:Destroy()
+        if ready then
+            gui:Destroy()
+            -- 弹窗关闭后恢复打开按钮
+            task.wait(0.2)
+            toggleOpenButton(true)
+        end
     end)
 end
 
 showWelcomePopup()
 
+-- ==================== 辅助函数 ====================
 local function T(t,n,k,cb)t:Toggle({Title=n,Value=false,Callback=function(v)if k then S[k]=v end if cb then cb(v)end end})end
 local function Sl(t,n,a,b,d,cb)t:Slider({Title=n,Value={Min=a,Max=b,Default=d},Callback=cb})end
 local function Dp(t,n,l,d,cb)t:Dropdown({Title=n,Values=l,Value=d or l[1],Multi=false,AllowNone=false,Callback=cb})end
@@ -462,32 +500,16 @@ Hm:Divider()
 
 Pa(Hm,"欢迎使用 ACE作弊精简版","本脚本使用 WindUI 构建\n执行后菜单默认不打开，点击灵动岛按钮打开。","hand")
 Sec(Hm,"版本信息")
-Pa(Hm,"当前版本","v2.9.9")
+Pa(Hm,"当前版本","v3.0.0")
 Pa(Hm,"执行者",L.DisplayName.." ("..L.Name..")")
-Bt(Hm,"复制加载链接","clipboard",'loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()')
+Bt(Hm,"复制加载链接","clipboard",'loadstring(game:HttpGet("https://raw.githubusercontent.com/jumanazarovziyomuhammad-eng/Ace-cheated/main/main.lua"))()')
 
 -- ==================== 联系方式 ====================
 Pa(Ct,"联系方式","加入官方 QQ 群或直接联系作者","phone")
 Sec(Ct,"官方 QQ 群")
-Ct:Button({
-    Title="复制官方 QQ 群号",
-    Desc="点击复制群号后，打开 QQ 粘贴搜索即可找到我们",
-    Icon="message-circle",
-    Callback=function()
-        setclipboard("1128017697")
-        nt("已复制","群号 1128017697 已复制，打开 QQ 粘贴搜索即可")
-    end
-})
+Ct:Button({Title="复制官方 QQ 群号",Desc="点击复制群号后，打开 QQ 粘贴搜索即可找到我们",Icon="message-circle",Callback=function()setclipboard("1128017697")nt("已复制","群号 1128017697 已复制")end})
 Sec(Ct,"作者 QQ")
-Ct:Button({
-    Title="复制作者 QQ",
-    Desc="点击复制 QQ 号后，打开 QQ 粘贴搜索即可添加作者",
-    Icon="user",
-    Callback=function()
-        setclipboard("2145493327")
-        nt("已复制","QQ 2145493327 已复制，打开 QQ 粘贴搜索即可")
-    end
-})
+Ct:Button({Title="复制作者 QQ",Desc="点击复制 QQ 号后，打开 QQ 粘贴搜索即可添加作者",Icon="user",Callback=function()setclipboard("2145493327")nt("已复制","QQ 2145493327 已复制")end})
 
 -- ==================== 使用教程 ====================
 Pa(Tu,"1. 如何执行脚本","打开执行器粘贴并执行，执行后菜单默认不打开。","play")
@@ -511,10 +533,10 @@ No:Divider()
 Pa(No,"普通公告","感谢大家一直以来的支持！\n我们会持续优化并修复问题，请勿用于任何商业用途。","megaphone")
 Pa(No,"使用须知","1. 仅供学习交流使用\n2. 请勿传播至非法渠道\n3. 使用后果自负","triangle-alert")
 
-Sec(Lg,"最新通知")Pa(Lg,"2026-10-05","当前版本 v2.9.9，欢迎弹窗新增背景图与过渡动画。","bell-ring")
+Sec(Lg,"最新通知")Pa(Lg,"2026-10-06","v3.0.0 修复自瞄预判、平滑度、人机瞄准，欢迎弹窗 QQ 群标红。","bell-ring")
 Sec(Lg,"更新日志")
-Pa(Lg,"v2.9.9  —  2026-10-05","· 欢迎弹窗新增背景图\n· 点击继续后播放过渡动画（缩小 → 黑屏 → 渐显）","sparkles")
-Pa(Lg,"v2.9.8  —  2026-10-05","· 欢迎弹窗改为原生 GUI\n· 继续按钮新增 10 秒倒计时","wrench")
+Pa(Lg,"v3.0.0  —  2026-10-06","· 自瞄加入预判，修复移动目标打不准\n· 平滑度改为 0~10，越小越准\n· 平滑度最小不再缩小画面\n· 新增瞄准真人 / 瞄准人机开关\n· 欢迎弹窗 QQ 群号标红\n· 倒计时期间隐藏灵动岛按钮","sparkles")
+Pa(Lg,"v2.9.8  —  2026-10-05","· 欢迎弹窗改为原生 GUI，新增 10 秒倒计时","wrench")
 Pa(Lg,"v2.9.7  —  2026-10-05","· 主页置顶官方 QQ 群，红色大字标注","wrench")
 
 -- ==================== 基础 ====================
@@ -526,13 +548,21 @@ T(Bs,"隐身（仅自身可见）","Inv",function(v)if v then lp("Inv",F.inv,.5)
 T(Bs,"战斗拦截")
 
 -- ==================== 自瞄 ====================
-Sec(Am,"自瞄开关")T(Am,"开启自瞄","Aim")
-Sec(Am,"查看 FOV")T(Am,"查看 FOV","ShowFOV")
+Sec(Am,"自瞄开关")
+T(Am,"开启自瞄","Aim")
+
+Sec(Am,"瞄准目标")
+T(Am,"瞄准真人","AimReal")
+T(Am,"瞄准人机 / NPC","AimNPC")
+
+Sec(Am,"查看 FOV")
+T(Am,"查看 FOV","ShowFOV")
+
 Sec(Am,"自瞄参数")
 Sl(Am,"FOV 大小",10,800,150,function(v)S.AF=v end)
-Sl(Am,"平滑度",.01,1,.1,function(v)S.AS=v end)
+Sl(Am,"平滑度（越小越准）",0,10,3,function(v)S.Smooth=v end)
+Sl(Am,"预判强度（打移动目标用）",0,0.5,0.15,function(v)S.Prediction=v end)
 Dp(Am,"瞄准部位",{"头部","躯干"},"头部",function(v)S.AT=v end)
-Dp(Am,"优先锁定模式",{"最近距离","最低血量","视线内"},"最近距离")
 
 -- ==================== 玩家 ====================
 Sec(Pl,"穿墙")T(Pl,"穿墙","Noclip",function(v)if v then lp("Noclip",F.clip,.1)end end)
@@ -597,30 +627,13 @@ Sp:Button({Title="刷新目标列表",Icon="refresh-cw",Callback=function()tD:Re
 -- ==================== 娱乐 ====================
 Sec(En,"人物特效（真实挂在角色身上）")
 Pa(En,"人物特效","选择后角色身上会持续显示对应特效\n所有特效真实挂在角色身上，会跟随移动","sparkles")
-En:Dropdown({
-    Title="选择人物特效",
-    Values={"无","头顶光环","环绕光球","能量翅膀","脚踏法阵","全身霓虹","残影幻影"},
-    Value="无",
-    Multi=false,AllowNone=false,
-    Callback=function(v)applyFX(v)nt("人物特效",v)end
-})
+En:Dropdown({Title="选择人物特效",Values={"无","头顶光环","环绕光球","能量翅膀","脚踏法阵","全身霓虹","残影幻影"},Value="无",Multi=false,AllowNone=false,Callback=function(v)applyFX(v)nt("人物特效",v)end})
 Sec(En,"旋转功能")
 Pa(En,"旋转功能","开启后角色会持续自转","rotate-cw")
-T(En,"开启人物旋转","spin",function(v)
-    if v then startSpin()else stopSpin()end
-end)
-Sl(En,"旋转速度（度/秒）",30,1080,360,function(v)
-    S.spinSpeed=v
-    if S.spin and spinBV then
-        spinBV.AngularVelocity=Vector3.new(0,math.rad(v),0)
-    end
-end)
+T(En,"开启人物旋转","spin",function(v)if v then startSpin()else stopSpin()end end)
+Sl(En,"旋转速度（度/秒）",30,1080,360,function(v)S.spinSpeed=v if S.spin and spinBV then spinBV.AngularVelocity=Vector3.new(0,math.rad(v),0)end end)
 Sec(En,"操作")
-En:Button({Title="停止全部娱乐效果",Icon="square",Callback=function()
-    clearFX()S.curFX="无"
-    stopSpin()S.spin=false
-    nt("已停止","娱乐效果已还原")
-end})
+En:Button({Title="停止全部娱乐效果",Icon="square",Callback=function()clearFX()S.curFX="无"stopSpin()S.spin=false nt("已停止","娱乐效果已还原")end})
 
 -- ==================== 服务器 ====================
 Sec(Sv,"服务器操作")Pa(Sv,"服务器","重进 / 换服 / 查看简介","server")
